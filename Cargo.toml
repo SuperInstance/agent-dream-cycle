@@ -1,4 +1,5 @@
 [package]
+description = "agent-dream-cycle"
 repository = "https://github.com/SuperInstance/agent-dream-cycle"
 name = "agent-dream-cycle"
 version = "0.1.0"
