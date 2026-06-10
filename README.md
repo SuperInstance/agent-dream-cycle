@@ -2,116 +2,214 @@
 
 **Offline memory consolidation — REM sleep for autonomous agents.**
 
-An experimental Rust library implementing the hypothesis that agents improve faster by periodically "dreaming" about their failures than by continuous operation. Just as human sleep consolidates memories and replays difficult experiences, this crate provides a framework for agents to pause, replay failures at high speed, and compress recent experiences into long-term patterns.
+## Why This Exists
 
-## Origin
+Agents that never pause to reflect have a problem: they accumulate raw experiences but never extract the patterns. They're like a student who does a thousand practice problems but never reviews the answers — volume without learning.
 
-Based on Qwen's insight: *".nail file is a sleeping brain, TelemetryDaemon is REM sleep"*
+The brain solved this millions of years ago: sleep. During REM sleep, the brain doesn't rest. It replays difficult experiences, matches failures against similar successes, and consolidates raw memories into abstract patterns. The `.nail` file is a sleeping brain; the `TelemetryDaemon` is REM sleep.
 
-This crate tests whether structured offline processing — dream cycles — produces measurable improvement in agent performance compared to continuous operation. The analogy to sleep cycles is deliberate: REM sleep appears to replay and integrate difficult experiences, and the same mechanism may benefit autonomous agents.
+This crate implements structured offline processing — dream cycles — for autonomous agents. When triggered, the agent pauses normal operation, replays failures at high speed, and compresses recent experiences into long-term patterns. The hypothesis: agents that dream about their failures improve faster than agents that never pause to consolidate, even though the dreaming agent spends some ticks "offline."
 
-## Core Concepts
+## The Key Insight
 
-### Experience
-The fundamental unit of memory: a record of a past interaction including input, output, success/failure status, reward score, and an embedding representation. Experiences accumulate during normal operation and are processed during dream cycles.
+**Failures are teachers, but only if you replay them.** A failure that sits in a log file teaches nothing. A failure replayed against similar successes teaches: "Instead of what you did, try what worked in this similar situation."
 
-```rust
-use agent_dream_cycle::Experience;
+The dream cycle is deliberately *not* about successes. Rehearsing what already worked is comforting but low-value. Replaying failures and finding the closest matching success is uncomfortable but high-value. The improvement score measures the gap: how much better could you be doing?
 
-let exp = Experience::simple(1, "user query about Rust lifetimes", false, -2.0, 42);
-```
-
-### DreamCycle
-The orchestrator that manages the dream state. When triggered, it:
-1. Pauses normal agent operation
-2. Replays all failure experiences through the `FailureReplay` engine
-3. Consolidates experiences into long-term patterns via `MemoryConsolidation`
-4. Produces a `ConsolidationReport` summarizing what was learned
+## Quick Start
 
 ```rust
-use agent_dream_cycle::{DreamCycle, MemoryConsolidation, FailureReplay};
+use agent_dream_cycle::*;
 
-let consolidation = MemoryConsolidation::new(3);
-let replay = FailureReplay::new(2.0);
+// Create a dream cycle with consolidation + replay engines
+let consolidation = MemoryConsolidation::new(3); // need 3+ experiences
+let replay = FailureReplay::new(2.0);            // 2x replay speed
 let mut dream = DreamCycle::new(consolidation, replay);
 
-dream.add_experience(Experience::simple(1, "query", false, -1.0, 0));
-dream.add_experience(Experience::simple(2, "query", true, 5.0, 1));
+// Feed it experiences during normal operation
+dream.add_experience(Experience::simple(1, "Rust lifetimes query", false, -2.0, 0));
+dream.add_experience(Experience::simple(2, "Pattern matching query", true, 5.0, 1));
+dream.add_experience(Experience::simple(3, "Ownership query", false, -1.5, 2));
+dream.add_experience(Experience::simple(4, "Traits query", true, 4.0, 3));
 
+// Trigger a dream cycle
 let report = dream.dream(10);
 println!("{}", report.summary);
+// "Dream cycle complete: processed 4 experiences, replayed 2 failures,
+//  learned 3 new patterns. Improvement: 12.00"
+```
+
+## Architecture
+
+```
+Experience (raw memory)
+├── id, input, output, success, reward
+├── embedding: Vec<f64> — for similarity search
+└── tick: u64 — when it happened
+
+MemoryConsolidation (compression engine)
+├── experiences: Vec<Experience>
+├── patterns: Vec<ConsolidatedPattern>
+├── min_experiences — threshold before consolidation triggers
+├── failures() / successes() — filter by outcome
+└── consolidate() → usize — compress experiences into patterns
+
+FailureReplay (REM sleep engine)
+├── speed: f64 — replay speed multiplier
+└── replay(consolidation) → FailureReplayResult
+    ├── failures_replayed — what was reviewed
+    ├── suggestions — "instead of X, try Y"
+    └── improvement_score — gap between success and failure rewards
+
+DreamCycle (orchestrator)
+├── consolidation + replay engines
+├── add_experience() — accumulate during normal operation
+├── dream(duration) → ConsolidationReport
+└── is_active() — currently dreaming?
+
+DreamScheduler (automatic triggering)
+├── interval: u64 — ticks between dream cycles
+├── tick() → Option<ConsolidationReport>
+├── tick_many(n) → Vec<ConsolidationReport>
+└── ticks_until_dream() — countdown
+```
+
+## API Reference
+
+### Experience
+
+The fundamental unit of memory.
+
+```rust
+// Full experience with embedding
+let exp = Experience::new(42, "user query", "agent response", true, 5.0, vec![0.1, 0.9], 100);
+
+// Simple experience (embedding = [reward])
+let simple = Experience::simple(1, "query text", false, -2.0, 42);
 ```
 
 ### MemoryConsolidation
-Compresses raw experiences into abstract patterns. It identifies failure patterns (low-reward clusters), success patterns (high-reward clusters), and reward distribution patterns. Requires a minimum number of experiences before consolidation triggers — dreaming with too little data is wasteful.
+
+Compresses raw experiences into abstract patterns.
+
+```rust
+let mut mc = MemoryConsolidation::new(3); // need 3+ experiences to consolidate
+mc.add_experience(Experience::simple(1, "a", false, -1.0, 0));
+mc.add_experience(Experience::simple(2, "b", true, 3.0, 1));
+mc.add_experience(Experience::simple(3, "c", true, 5.0, 2));
+
+let new_patterns = mc.consolidate();
+// Generates: failure pattern (avg reward), success pattern (avg reward),
+//            reward distribution (quartile analysis)
+```
+
+| Method | Returns | Purpose |
+|--------|---------|---------|
+| `new(min)` | `MemoryConsolidation` | Create with threshold |
+| `add_experience(exp)` | `()` | Store an experience |
+| `failures()` | `Vec<&Experience>` | All failure experiences |
+| `successes()` | `Vec<&Experience>` | All success experiences |
+| `consolidate()` | `usize` | Compress into patterns |
+| `len()` | `usize` | Total experiences stored |
 
 ### FailureReplay
-The REM sleep engine: replays failure experiences and matches them against the closest successes. For each failure, it identifies the most similar success (by embedding cosine similarity) and generates a suggestion: "Instead of what you did, try what worked in this similar situation." The improvement score measures the gap between average success and failure rewards.
+
+The REM sleep engine: replay failures, find matching successes.
 
 ```rust
-use agent_dream_cycle::{FailureReplay, MemoryConsolidation, Experience};
-
 let replay = FailureReplay::new(2.0); // 2x speed multiplier
 let result = replay.replay(&consolidation);
-println!("Improvement potential: {}", result.improvement_score);
+
+for (suggestion, context) in &result.suggestions {
+    println!("{}\n  {}", suggestion, context);
+}
+println!("Improvement potential: {:.2}", result.improvement_score);
 ```
 
-### DreamScheduler
-Triggers dream cycles at regular intervals (every N ticks). The scheduler tracks time and automatically invokes dream cycles when the interval elapses, returning consolidation reports.
+The improvement score = `(avg_success_reward - avg_failure_reward) × speed`. Higher speed means the replay covers more ground per tick, amplifying the improvement potential.
+
+### DreamCycle & DreamScheduler
 
 ```rust
-use agent_dream_cycle::{DreamScheduler, DreamCycle, MemoryConsolidation, FailureReplay, Experience};
+// Manual dream cycles
+let mut dc = DreamCycle::new(MemoryConsolidation::new(1), FailureReplay::new(1.0));
+dc.add_experience(Experience::simple(1, "query", false, -3.0, 0));
+let report = dc.dream(10);
 
+// Scheduled dream cycles
 let dc = DreamCycle::new(MemoryConsolidation::new(1), FailureReplay::new(1.0));
 let mut scheduler = DreamScheduler::new(100, dc); // dream every 100 ticks
-
-// During operation, add experiences
-scheduler.dream_cycle.add_experience(Experience::simple(1, "query", false, -3.0, 0));
-
-// Advance time
+scheduler.dream_cycle.add_experience(Experience::simple(1, "q", false, -1.0, 0));
 let reports = scheduler.tick_many(200);
-// One dream at tick 100
+// One dream cycle fires at tick 100
 ```
 
-## Design Principles
+## Real-World Example: Scheduled Learning
 
-1. **Failures are teachers.** The dream cycle focuses on failures, not successes. Replaying failures and finding similar successes is more valuable than rehearsing what already worked.
+```rust
+use agent_dream_cycle::*;
 
-2. **Sleep is productive.** Dream cycles aren't idle time — they're active processing. The `improvement_score` quantifies how much better the agent could perform based on what was learned.
+let dc = DreamCycle::new(MemoryConsolidation::new(2), FailureReplay::new(1.5));
+let mut scheduler = DreamScheduler::new(50, dc); // dream every 50 ticks
 
-3. **Consolidation compresses.** Raw experiences are verbose; consolidated patterns are compact. The ratio of experiences to patterns measures compression efficiency.
+// Simulate an agent operating and accumulating experiences
+for tick in 0..200 {
+    // Agent does work, sometimes succeeds, sometimes fails
+    let success = tick % 3 != 0; // fails 1/3 of the time
+    let reward = if success { 3.0 + (tick as f64 * 0.02) } else { -2.0 };
+    let exp = Experience::simple(
+        tick, &format!("task-{}", tick), success, reward, tick
+    );
+    scheduler.dream_cycle.add_experience(exp);
 
-4. **Scheduled, not ad-hoc.** The `DreamScheduler` enforces regular dream cycles, preventing the agent from running indefinitely without consolidation.
-
-## Metrics
-
-- **Improvement score**: Gap between average success and failure rewards, weighted by replay speed
-- **Consolidation compression**: Ratio of experiences to patterns generated
-- **Dream frequency**: How often dream cycles trigger relative to normal operation
-- **Failure replay coverage**: Percentage of failures that found matching successes
-- **ConsolidationReport**: Complete summary of what was learned per cycle
-
-## Testing
-
-The crate includes 12 comprehensive tests covering:
-- Dream cycle execution (start, process, complete)
-- Failure replay with and without data
-- Memory consolidation threshold enforcement
-- Pattern generation from mixed experiences
-- Scheduler timing and interval accuracy
-- Improvement score calculation
-- Report generation and formatting
-- Cosine similarity correctness
-- Multi-tick scheduling with `tick_many`
-
-Run tests with:
-```bash
-cargo test
+    // Check if it's time to dream
+    if let Some(report) = scheduler.tick() {
+        println!("Tick {}: {}", tick, report.summary);
+        println!("  Suggestions: {}", report.suggestions_count);
+        println!("  Improvement: {:.2}", report.improvement_score);
+    } else {
+        scheduler.current_tick += 1;
+        // Adjust: tick() advances internally
+    }
+}
 ```
 
-## Experimental Hypothesis
+## Performance
 
-This crate tests whether periodic offline processing (dreaming) produces better agent improvement than continuous operation. The key prediction: agents that dream about their failures will show faster improvement curves than agents that never pause to consolidate, even though the dreaming agent spends some ticks "offline."
+- **O(f × s) per replay** — f failures × s successes for similarity matching
+- **O(n log n) per consolidation** — sort by reward for quartile analysis
+- **O(1) per experience add** — simple vector push
+- **Consolidation threshold** prevents wasteful dreams with too little data
+- **Speed multiplier** lets you control replay granularity vs cost
+
+## The Deeper Idea
+
+The dream cycle has four properties that make it more than just "batch processing":
+
+1. **Failure-focused.** Replaying successes is comforting but low-yield. Replaying failures and finding matching successes is where learning happens. The improvement score quantifies this directly.
+
+2. **Compression.** Raw experiences are verbose; consolidated patterns are compact. The ratio of experiences to patterns measures compression efficiency. A thousand experiences compressed into a dozen patterns is good compression.
+
+3. **Scheduled, not ad-hoc.** Regular consolidation prevents the agent from accumulating unprocessed experiences indefinitely. The scheduler enforces rhythm.
+
+4. **Speed multiplier.** Dreams run faster than real-time. A 2x multiplier means the replay covers twice the ground in the same number of ticks. The tradeoff: less thorough matching (only closest success per failure) for speed.
+
+The cosine similarity matching is deliberately simple: for each failure, find the success with the highest embedding similarity. This isn't sophisticated ML — it's a fast heuristic that works well enough for online learning. The embedding vector is the key: experiences with similar embeddings had similar contexts, so the matching success likely applies.
+
+## Open Questions
+
+- **Consolidation decay**: Should old patterns decay in relevance? Does a pattern from 1000 ticks ago still apply?
+- **Embedding quality**: The default embedding is `[reward]` — a single scalar. How much better does dream-learning get with richer embeddings?
+- **Dream duration**: Is there an optimal dream duration? Too short and consolidation is shallow; too long and the agent misses too many operating ticks.
+- **Interference**: Do dream-generated patterns interfere with each other? Can consolidation create contradictions?
+- **Failure replay order**: Does the order in which failures are replayed matter? Should high-cost failures be replayed first?
+
+## Ecosystem Connections
+
+- **`agent-orchestration`** — Fleet dynamics determine when agents can afford to dream
+- **`agent-ternary-gate`** — Dreaming changes the AgentReady condition (agent is offline)
+- **`agent-phase-change`** — Dream cycles can trigger phase transitions in agent capability
+- **`agent-metamorphosis`** — Developmental phases affect what's consolidated (early agents consolidate differently than late agents)
 
 ## License
 
